@@ -17,7 +17,7 @@ add_executable (${APP_NAME}
      "program.h" "program.cpp" "debug_helper.h"
      "programDetail.cpp" "common_def.h"
      "utils/quickShaders.h" "Engine/engine.h"
-    "Engine/engine.cpp")
+    "Engine/engine.cpp" "comps/lifetime.h" "comps/lifetime.cpp" "program_def.h")
 
 set_property(TARGET ${APP_NAME} PROPERTY CXX_STANDARD 20)
 

@@ -2,6 +2,8 @@
 #include <dawn/webgpu.h>
 #include "window/quickWindow.h"
 #include "Engine/engine.h"
+#include "comps/lifetime.h"
+#include <memory>
 
 #ifndef DebugMessage
 #define DebugMessage(...) (void(0))
@@ -23,6 +25,7 @@ struct WindowInit {
 class Program {
 	friend class Engine;
 private:
+	//WGPU stuff
 	WGPUInstance instance = nullptr;
 	WGPUAdapter adapter = nullptr;
 	WGPUDevice device = nullptr;
@@ -35,20 +38,30 @@ private:
 	qContext windowContext = {};
 	WGPUTextureFormat PREFERRED_FORMAT = WGPUTextureFormat::WGPUTextureFormat_RGBA8Uint;
 
-	void beginGraphics();
-	void beginLogic();
-
+	//engine
+	std::unique_ptr<Engine> engine;
+	//logic stuff
 	struct Size {
 		uint16_t w;
 		uint16_t h;
-	} windowSize{0,0};
+	};
+	Size windowSize{ 0,0 };
+	Size asyincWindowSize{ 0,0 };
 	bool dirtySize = true;
+	bool dirtyGSize = true;
 	bool running = true;
+	Time gTimer = Time(false);
+
+
+	int beginGraphics();
+	int beginLogic();
+
 public:
 	Program(GraphicInit = GraphicInit(), WindowInit = WindowInit());
 	void init();
 	bool run();
-	void onResizeWindow(RECT rect); //ATTENZIONE, CHIAMATO ASYNC! non cambiare main thread qui
+	void onResizeWindow();
+	void notifySizeChange(RECT rect);
 	
 
 	WGPUInstance getInstance() const { return instance; }

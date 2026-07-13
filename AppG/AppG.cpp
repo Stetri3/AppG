@@ -25,7 +25,7 @@ int main()
 
 	Program program;
 	program.init();
-	WGPUShaderSourceWGSL source_test;
+	/*	WGPUShaderSourceWGSL source_test;
 	source_test.chain.next = nullptr;
 	source_test.chain.sType = WGPUSType_ShaderSourceWGSL; // Tells WebGPU this is WGSL text
 	source_test.code = shader_test;
@@ -33,7 +33,7 @@ int main()
 	shDesc.nextInChain = &source_test.chain;
 	shDesc.label = "Test shader"_ws;
 	WGPUShaderModule shMod = wgpuDeviceCreateShaderModule(program.getDevice(), &shDesc);
-	
+	*/
 	while (program.run()) {
 		//Testing
 		wgpuSurfacePresent(program.getWinSurface());

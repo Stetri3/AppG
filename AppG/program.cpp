@@ -21,7 +21,7 @@ uint64_t basicCallback(void* inst, HWND hWnd, UINT message, WPARAM wParam, LPARA
 		RECT clientRect;
 		GetClientRect(hWnd, &clientRect);
 		//Attenzione, le coordinate windows vanno left->right top->bottom, (0,0) è alto a sinistra
-		th->onResizeWindow(clientRect);
+		th->notifySizeChange(clientRect);
 		return 0;
 	}
 	case WM_ERASEBKGND:
@@ -32,7 +32,7 @@ uint64_t basicCallback(void* inst, HWND hWnd, UINT message, WPARAM wParam, LPARA
 	}
 }
 
-void Program::beginGraphics()
+int Program::beginGraphics()
 {
 	if (windowView) {
 		wgpuTextureViewRelease(this->windowView);
@@ -40,11 +40,17 @@ void Program::beginGraphics()
 	if (windowTexture.texture) {
 		wgpuTextureRelease(windowTexture.texture);
 	}
-	if (dirtySize) {
-		this->windowConfig.width = windowSize.w;
-		this->windowConfig.height = windowSize.h;
-		wgpuSurfaceConfigure(windowSurface, &windowConfig);
-		dirtySize = false;
+	if (dirtyGSize) {
+		if (windowSize.w == 0 || windowSize.h == 0) {
+			std::tie(this->windowTexture, this->windowView) = utils::wgpu::getNextTexture(windowSurface, surfViewDesc);
+			return 4;
+		}
+		else {
+			this->windowConfig.width = windowSize.w;
+			this->windowConfig.height = windowSize.h;
+			wgpuSurfaceConfigure(windowSurface, &windowConfig);
+			dirtyGSize = false;
+		}
 	}
 
 	std::tie(this->windowTexture, this->windowView) = utils::wgpu::getNextTexture(windowSurface, surfViewDesc);
@@ -55,14 +61,21 @@ void Program::beginGraphics()
 		else {
 			DebugMessage("Errore, windowTexture non inizializzato correttamente. Status: ", (int)(windowTexture.status));
 			onClose();
-			return;
+			return -3;
 		}
 	}
-
+	engine->RenderFrame(windowView);
+	engine->RenderFrame2(windowView, static_cast<float>(gTimer.get() / 10E9));
+	return 0;
 }
 
-void Program::beginLogic()
-{}
+int Program::beginLogic()
+{
+	//Check size
+	if (dirtySize)
+		onResizeWindow();
+	return 0;
+}
 
 Program::Program(GraphicInit gIn, WindowInit wIn)
 {
@@ -144,7 +157,12 @@ void Program::init()
 			return;
 		}
 	}
+	engine = std::make_unique<Engine>(this);
+	DebugMessage("Initializing engine...");
+	engine->Initialize();
 
+	//Post init:
+	gTimer.start();
 }
 
 bool Program::run()
@@ -157,21 +175,35 @@ bool Program::run()
 	}
 
 	//Qui la logica fissa rising edge
-	beginLogic();
-	beginGraphics();
+	int retL = beginLogic();
+	int retG = beginGraphics();
 
+	if (retG == 4) {
+		//RetCode::window_zero : 
+		return true;
+	}
 
 	
 
 	return running;
 }
 
-void Program::onResizeWindow(RECT rect)
+void Program::onResizeWindow()
+{
+	this->windowSize = asyincWindowSize;
+	engine->updateWinSize(windowSize.w, windowSize.h);
+	//Nota: per comodità teniamo dirtySize true fino a beginGraphics(), toggle sarà fatto lì
+	//Update: dirtySize rimosso qui, dirtyGSize per la parte grafica
+	dirtySize = false;
+}
+
+void Program::notifySizeChange(RECT rect)
 {
 	uint16_t w = utils::max_zero(rect.right - rect.left);
 	uint16_t h = utils::max_zero(rect.bottom - rect.top);
-	this->windowSize = { w, h };
-	this->dirtySize = true;
+	asyincWindowSize = { w, h };
+	dirtySize = true;
+	dirtyGSize = true;
 }
 
 void Program::onClose()
