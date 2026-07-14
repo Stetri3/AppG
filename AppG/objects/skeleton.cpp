@@ -1,88 +1,123 @@
 #include "skeleton.h"
+#include <algorithm>
+
 namespace sk {
 
-	// Ottiene lo span del sottoalbero in O(1) sfruttando subtree_size
-	std::span<Node> Skeleton::get_subTree(uint32_t index) {
-		if (index >= nodes.size()) {
-			return {};
-		}
+	// Struct to keep track of the parent state during our flat DFS traversal
+	struct ParentState {
+		Mat3f ori;
+		Vec3f pos;
+	};
+	// Recalculates world-space matrices in a single O(N) pass
+	void Skeleton::update_absolute_transforms() {
+		if (nodes.empty()) return;
 
+		// Flat array acting as a stack to track parent transforms down the DFS depth.
+		// A size of 64 easily covers any realistic skeletal hierarchy depth.
+		ParentState parent_stack[64];
+		int stack_ptr = 0;
+
+		// Seed a default global root state
+		parent_stack[0] = { Mat3f::Identity(), Vec3f{0.0f, 0.0f, 0.0f} };
+
+		for (size_t i = 0; i < nodes.size(); ++i) {
+			Node& node = nodes[i];
+			ParentState current_parent = parent_stack[stack_ptr];
+
+			// 1. Check if this node is attached to the body (base node)
+			if ((node.branch & (1 << 7)) != 0) {
+				// Find matching body attachment
+				for (const auto& att : attached) {
+					if (att.index == i) {
+						current_parent.pos = att.pos;
+						current_parent.ori = Mat3f::Identity(); // Base nodes align with body
+						break;
+					}
+				}
+			}
+
+			// 2. Compute absolute orientation: ParentOri * LocalOri
+			node.abs_ori = current_parent.ori * node.local_ori;
+
+			// 3. Compute absolute position: ParentPos + ParentOri * LocalPos
+			node.abs_pos = current_parent.pos + (current_parent.ori * node.local_pos);
+
+			// 4. Update DFS stack based on branch instruction
+			uint8_t branch_type = node.branch & 0x7F; // Strip base node bit
+
+			if (branch_type == 0) {
+				// Go down a level: This node becomes the parent for the next nodes
+				if (stack_ptr < 63) {
+					stack_ptr++;
+					parent_stack[stack_ptr] = { node.abs_ori, node.abs_pos };
+				}
+			}
+			else if (branch_type == 2) {
+				// Go up a level: Pop current parent
+				if (stack_ptr > 0) {
+					stack_ptr--;
+				}
+			}
+			// branch_type == 1 (stay on same level) leaves the stack pointer untouched
+		}
+	}
+
+	std::span<Node> Skeleton::get_subTree(uint32_t index) {
+		if (index >= nodes.size()) return {};
 		uint32_t size = nodes[index].subtree_size;
-		// Sicurezza contro out-of-bounds se subtree_size non è coerente
 		if (index + size > nodes.size()) {
 			size = static_cast<uint32_t>(nodes.size() - index);
 		}
-
 		return std::span<Node>(nodes.data() + index, size);
 	}
 
-	// Sovrascrive posizioni e orientamenti locali dei nodi nel sottoalbero
-	bool Skeleton::move_manual(std::span<Vec3f> pos, std::span<Mat3f> ori, uint32_t index) {
+	// Writes directly to local coordinate registers
+	bool Skeleton::move_manual(std::span<Vec3f> local_pos, std::span<Mat3f> local_ori, uint32_t index) {
 		auto sub_tree = get_subTree(index);
-		if (sub_tree.empty()) {
-			return false;
-		}
+		if (sub_tree.empty()) return false;
 
-		// Possiamo aggiornare solo fino al limite degli span passati in input
-		size_t update_size = std::min({ sub_tree.size(), pos.size(), ori.size() });
+		size_t update_size = std::min({ sub_tree.size(), local_pos.size(), local_ori.size() });
 
 		for (size_t i = 0; i < update_size; ++i) {
-			sub_tree[i].pos = pos[i];
-			sub_tree[i].ori = ori[i];
+			sub_tree[i].local_pos = local_pos[i];
+			sub_tree[i].local_ori = local_ori[i];
 		}
 
+		// Flag/Trigger update pass after manual edits
+		update_absolute_transforms();
 		return true;
 	}
 
-	// Ruota l'intero sottoalbero rispetto alla posizione del suo nodo radice (root_index)
+	// O(1) Rotation: Only the root of the subtree needs its local frame rotated!
 	void Skeleton::rotate_subTree(uint32_t root_index, const Mat3f& rotation_matrix) {
-		auto sub_tree = get_subTree(root_index);
-		if (sub_tree.empty()) {
-			return;
-		}
+		if (root_index >= nodes.size()) return;
 
-		// La rotazione del sottoalbero avviene attorno alla posizione della radice locale
-		Vec3f pivot = sub_tree[0].pos;
+		// Transform the local coordinate space of the root node
+		nodes[root_index].local_ori = rotation_matrix * nodes[root_index].local_ori;
 
-		for (Node& node : sub_tree) {
-			// 1. Ruota l'orientamento del nodo: R * Ori
-			node.ori = rotation_matrix * node.ori;
-
-			// 2. Ruota la posizione del nodo rispetto al pivot
-			// pos_nuova = pivot + R * (pos_attuale - pivot)
-			Vec3f local_pos = node.pos - pivot;
-			node.pos = pivot + (rotation_matrix * local_pos);
-		}
+		// Defer absolute position updates to the O(N) linear sweep
+		update_absolute_transforms();
 	}
 
-	// Applica una trasformazione affine 4x4 (rotazione + traslazione) al sottoalbero
+	// O(1) Affine Transform: Mutates the local relative channel of the root
 	void Skeleton::transform_subTree(uint32_t root_index, const Mat4f& local_transform) {
-		auto sub_tree = get_subTree(root_index);
-		if (sub_tree.empty()) {
-			return;
-		}
+		if (root_index >= nodes.size()) return;
 
-		// Estraiamo la parte di rotazione 3x3 e traslazione 3x1 dalla matrice 4x4
-		// Nota: Assumiamo che la tua classe Mat4f esponga l'accesso agli elementi o costruttori di conversione.
-		// Se la libreria non lo supporta direttamente, adatta l'estrazione degli indici.
 		Mat3f R;
 		for (int r = 0; r < 3; ++r) {
 			for (int c = 0; c < 3; ++c) {
 				R(r, c) = local_transform(r, c);
 			}
 		}
-
 		Vec3f T{ local_transform(0, 3), local_transform(1, 3), local_transform(2, 3) };
-		Vec3f pivot = sub_tree[0].pos;
 
-		for (Node& node : sub_tree) {
-			// 1. Applica la rotazione all'orientamento
-			node.ori = R * node.ori;
+		// Rotate the local orientation frame
+		nodes[root_index].local_ori = R * nodes[root_index].local_ori;
 
-			// 2. Trasforma la posizione relativa al pivot:
-			// pos_nuova = pivot + R * (pos_attuale - pivot) + T
-			Vec3f local_pos = node.pos - pivot;
-			node.pos = pivot + (R * local_pos) + T;
-		}
+		// Offset local translation relative to parent frame
+		nodes[root_index].local_pos = (R * nodes[root_index].local_pos) + T;
+
+		// Propagate relative changes down the hierarchy
+		update_absolute_transforms();
 	}
 }

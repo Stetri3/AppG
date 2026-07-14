@@ -64,8 +64,8 @@ int Program::beginGraphics()
 			return -3;
 		}
 	}
-	engine->RenderFrame(windowView);
-	engine->RenderFrame2(windowView, static_cast<float>(gTimer.get() / 10E9));
+	engine->Update(gTimer.get());
+	engine->Render(windowView);
 	return 0;
 }
 
@@ -191,7 +191,7 @@ bool Program::run()
 void Program::onResizeWindow()
 {
 	this->windowSize = asyincWindowSize;
-	engine->updateWinSize(windowSize.w, windowSize.h);
+	engine->HandleResize(windowSize.w, windowSize.h);
 	//Nota: per comodità teniamo dirtySize true fino a beginGraphics(), toggle sarà fatto lì
 	//Update: dirtySize rimosso qui, dirtyGSize per la parte grafica
 	dirtySize = false;

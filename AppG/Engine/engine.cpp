@@ -1,410 +1,313 @@
-#include "Engine.h"
+#include "engine.h"
 #include "../program.h"
-#include <vector>
-#include <cmath>
-#include <string.h>
-#include "../utils.h"
+#include <iostream>
 
-// ============================================================================
-// THE WGSL SHADER SYSTEM
-// ============================================================================
-// Shaders are code executing inside the physical execution blocks of the GPU.
-// WebGPU uses WGSL (WebGPU Shading Language) as its modern shading syntax.
-const WGPUStringView shaderSource = R"(
-// 1. Uniform Struct Blueprint: This MUST perfectly mimic the memory layout 
-// of the 'MeshUniforms' structure defined in our C++ header file. 
-struct MeshUniforms {
-    modelViewProjectionMatrix : mat4x4<f32>,
-    customColorTint : vec4<f32>,
+// Standard WGSL skeletal vertex shader
+const WGPUStringView standardShaderSource = R"(
+struct GlobalUniforms {
+    viewProj : mat4x4<f32>,
     time : f32,
 }
 
-// Group 0, Binding 0 matches our pipeline bindings layout layout Entry configurations.
-// 'var<uniform>' signals that this variable is static memory per draw instruction.
-@group(0) @binding(0) var<uniform> uniforms : MeshUniforms;
-
-// 2. Vertex Inputs structure: maps data coming from the Vertex Buffer attributes.
-struct VertexInput {
-    @location(0) position : vec3<f32>, // Binds to Location 0 (Position X,Y,Z)
-    @location(1) color : vec3<f32>,    // Binds to Location 1 (Color R,G,B)
+struct InstanceUniforms {
+    model : mat4x4<f32>,
+    colorTint : vec4<f32>,
 }
 
-// 3. Output Stage Interface between the Vertex Processor and Fragment Processor.
+@group(0) @binding(0) var<uniform> globals : GlobalUniforms;
+@group(0) @binding(1) var<uniform> instance : InstanceUniforms;
+@group(0) @binding(2) var<storage, read> joints : array<mat4x4<f32>>;
+
+struct VertexInput {
+    @location(0) position : vec3<f32>,
+    @location(1) normal : vec3<f32>,
+    @location(2) color : vec3<f32>,
+    @location(3) joints : vec4<u32>,
+    @location(4) weights : vec4<f32>,
+}
+
 struct VertexOutput {
-    @builtin(position) clip_position : vec4<f32>, // Required: Coordinates in 4D Clip Space
-    @location(0) color : vec3<f32>,               // Extrapolated color variable sent down the wire
+    @builtin(position) clip_position : vec4<f32>,
+    @location(0) color : vec3<f32>,
 }
 
 @vertex
-fn vs_main(
-    model : VertexInput,
-    @builtin(instance_index) instanceIdx : u32 // Built-in: tells us which instance copy this vertex belongs to
-) -> VertexOutput {
+fn vs_main(model : VertexInput) -> VertexOutput {
     var out: VertexOutput;
     
-    // Procedural Instancing Offset Math:
-    // To prevent all 5 triangle duplicates from rendering directly on top of each other,
-    // we use the 'instanceIdx' (0, 1, 2, 3, 4) to shift the X and Y coordinates.
-    let offsetX = f32(instanceIdx) * 0.25 - 0.5;
-    let offsetY = f32(instanceIdx) * 0.15 - 0.3;
-    let offset = vec3<f32>(offsetX, offsetY, 0.0);
+    // Resolve Absolute Skeletal Transform
+    let skinMatrix = 
+        model.weights.x * joints[model.joints.x] +
+        model.weights.y * joints[model.joints.y] +
+        model.weights.z * joints[model.joints.z] +
+        model.weights.w * joints[model.joints.w];
+        
+    let worldPosition = instance.model * skinMatrix * vec4<f32>(model.position, 1.0);
     
-    // Add the structural offset directly to our raw local mesh coordinates
-    let shiftedPosition = vec4<f32>(model.position + offset, 1.0);
-    
-    // The Ultimate 3D-to-2D calculation step:
-    // We multiply our 3D coordinates by the transformation matrix passed from the uniform buffer.
-    out.clip_position = uniforms.modelViewProjectionMatrix * shiftedPosition;
-    
-    // Send the color down the pipeline. The GPU rasterizer will automatically interpolate 
-    // this color across the face of the triangle before sending it to the fragment shader.
-    out.color = model.color;
+    out.clip_position = globals.viewProj * worldPosition;
+    out.color = model.color * instance.colorTint.rgb;
     return out;
 }
 
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4<f32> {
-    // Collect the hardware interpolated vertex gradient color (RGB) 
-    // and multiply it by our dynamic oscillating color tint passed from C++.
-    let finalColor = vec4<f32>(in.color, 1.0) * uniforms.customColorTint;
-    
-    // Output the final computed pixel state to color target attachment 0 (our screen surface)
-    return finalColor;
+    return vec4<f32>(in.color, 1.0);
 }
 )"_ws;
 
-// ============================================================================
-// ENGINE LIFECYCLE MANAGEMENT
-// ============================================================================
+Engine::Engine(Program* p) : program(p) {}
 
-// Engine Constructor: Hooks into the initialized core properties of your 'Program' instance
-Engine::Engine(Program* p)
-    : program(p), device(p->device), queue(nullptr), pipeline(nullptr),
-    vertexBuffer(nullptr), uniformBuffer(nullptr), bindGroupLayout(nullptr), bindGroup(nullptr)
-{
-    // Queries the underlying physical graphics card properties and features 
-    // directly through your parent window device context
-    wgpuDeviceGetFeatures(device, &devFeatures);
-    wgpuDeviceGetLimits(device, &devLimits);
-}
-
-// Destructor: Safely de-allocates raw WebGPU handles. 
-// WebGPU structures are reference-counted objects managed by the underlying C runtime layer.
 Engine::~Engine() {
-    if (bindGroup) wgpuBindGroupRelease(bindGroup);
-    if (bindGroupLayout) wgpuBindGroupLayoutRelease(bindGroupLayout);
-    if (uniformBuffer) wgpuBufferRelease(uniformBuffer);
-    if (vertexBuffer) wgpuBufferRelease(vertexBuffer);
-    if (pipeline) wgpuRenderPipelineRelease(pipeline);
+    Clean();
 }
 
-// Initialization Pass: Prepares the static structures needed by the engine to run
 void Engine::Initialize() {
-    // Grab the queue interface from our engine program container
-    queue = program->queue;
+    device = program->getDevice();
+    queue = program->getQueue();
 
-    // IMPORTANT PIPELINE SETUP ORDER:
-    // 1. Create geometry and allocate data buffers first, so their sizes and handles exist.
-    CreateGeometry();
-
-    // 2. Build the shader modules, establish bind layouts, and hook up pipeline blueprints next.
+    // 1. Setup frame buffers and base pipelines
+    CreateDepthResources();
     CreateRenderPipeline();
+
+    // 2. Allocate global system memory (such as camera buffers)
+    WGPUBufferDescriptor globalBufferDesc = {};
+    globalBufferDesc.size = sizeof(gfx::GlobalUniforms);
+    globalBufferDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    globalUniformBuffer = wgpuDeviceCreateBuffer(device, &globalBufferDesc);
+}
+
+void Engine::HandleResize(float w, float h) {
+    width = w;
+    height = h;
+    CreateDepthResources(); // Recreate depth texture to match window bounds
 }
 
 // ============================================================================
-// RESOURCE ALLOCATION METHODS
+// PIPELINE CREATION
 // ============================================================================
-
-void Engine::CreateGeometry() {
-    // Define a perfect geometric triangle in local coordinates
-    std::vector<Vertex> vertices = {
-        // Local Coordinates {X, Y, Z},   Vertex Color Channels {R, G, B}
-        { {  0.0f,  0.4f, 0.0f },         { 1.0f, 0.0f, 0.0f } }, // Top point (Solid Red)
-        { { -0.4f, -0.4f, 0.0f },         { 0.0f, 1.0f, 0.0f } }, // Bottom-Left (Solid Green)
-        { {  0.4f, -0.4f, 0.0f },         { 0.0f, 0.0f, 1.0f } }  // Bottom-Right (Solid Blue)
-    };
-
-    // 1. Allocate Vertex Buffer Allocation on the GPU Hardware Frame Buffer
-    WGPUBufferDescriptor bufferDesc = {};
-    bufferDesc.size = vertices.size() * sizeof(Vertex); // Total memory footprints in bytes
-    // Usage Flags tell the hardware how to optimize caches:
-    // WGPUBufferUsage_Vertex: optimized for raw vertex attribute streams.
-    // WGPUBufferUsage_CopyDst: allows writing data into it from the CPU via wgpuQueueWriteBuffer.
-    bufferDesc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
-    bufferDesc.mappedAtCreation = false;
-
-    vertexBuffer = wgpuDeviceCreateBuffer(device, &bufferDesc);
-
-    // Synchronously copy our CPU array data over the PCIe bus straight into the GPU memory allocation
-    wgpuQueueWriteBuffer(queue, vertexBuffer, 0, vertices.data(), bufferDesc.size);
-
-    // 2. Allocate Uniform Buffer Allocation for Dynamic Matrices & Constants
-    WGPUBufferDescriptor uniformDesc = {};
-    uniformDesc.size = sizeof(MeshUniforms); // Size must be a multiple of 16 bytes for proper WebGPU structure alignment
-    // WGPUBufferUsage_Uniform: flag optimizing memory caches for simultaneous access by thousands of shader cores.
-    uniformDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
-    uniformDesc.mappedAtCreation = false;
-
-    uniformBuffer = wgpuDeviceCreateBuffer(device, &uniformDesc);
-
-    // Create a default identity matrix so the old RenderFrame doesn't multiply by all zeros!
-    MeshUniforms defaultUniforms = {};
-    for (int i = 0; i < 16; i++) {
-        defaultUniforms.modelViewProjectionMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
-    }
-    defaultUniforms.customColorTint[0] = 1.0f; // Red
-    defaultUniforms.customColorTint[1] = 1.0f; // Green
-    defaultUniforms.customColorTint[2] = 1.0f; // Blue
-    defaultUniforms.customColorTint[3] = 1.0f; // Alpha (Solid opacity)
-
-    // Upload the default identity data immediately to the GPU uniform memory slot
-    wgpuQueueWriteBuffer(queue, uniformBuffer, 0, &defaultUniforms, sizeof(MeshUniforms));
-}
-
 void Engine::CreateRenderPipeline() {
-    // 1. Compile Shaders
-    WGPUShaderSourceWGSL wgslDesc = {};
-    wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
-    wgslDesc.code = shaderSource; // Set up explicit Dawn string view wrapper
+    // A. BIND GROUP LAYOUT: The static blueprint of variables expected by our pipeline
+    WGPUBindGroupLayoutEntry entries[3] = {};
+    // Binding 0: Global Uniforms (Camera, Time)
+    entries[0].binding = 0;
+    entries[0].visibility = WGPUShaderStage_Vertex;
+    entries[0].buffer.type = WGPUBufferBindingType_Uniform;
 
-    WGPUShaderModuleDescriptor shaderDesc = {};
-    shaderDesc.nextInChain = &wgslDesc.chain;
-    WGPUShaderModule shaderModule = wgpuDeviceCreateShaderModule(device, &shaderDesc);
+    // Binding 1: Instance Uniforms (Transform, Color Tint)
+    entries[1].binding = 1;
+    entries[1].visibility = WGPUShaderStage_Vertex;
+    entries[1].buffer.type = WGPUBufferBindingType_Uniform;
 
-    // 2. Configure Vertex Attrib Formatting: Tells the hardware how to parse our byte array into vectors
-    std::vector<WGPUVertexAttribute> vertexAttributes(2);
-
-    // Position Attribute Layout (Location 0 in WGSL Input layout)
-    vertexAttributes[0].format = WGPUVertexFormat_Float32x3; // Matches float[3]
-    vertexAttributes[0].offset = offsetof(Vertex, position); // Byte distance from the start of the struct
-    vertexAttributes[0].shaderLocation = 0;
-
-    // Color Attribute Layout (Location 1 in WGSL Input layout)
-    vertexAttributes[1].format = WGPUVertexFormat_Float32x3; // Matches float[3]
-    vertexAttributes[1].offset = offsetof(Vertex, color);    // Byte offset past position float components
-    vertexAttributes[1].shaderLocation = 1;
-
-    WGPUVertexBufferLayout vertexBufferLayout = {};
-    vertexBufferLayout.arrayStride = sizeof(Vertex); // Gap size in bytes between individual vertices
-    vertexBufferLayout.stepMode = WGPUVertexStepMode_Vertex; // Jump to next index per vertex loop
-    vertexBufferLayout.attributeCount = static_cast<uint32_t>(vertexAttributes.size());
-    vertexBufferLayout.attributes = vertexAttributes.data();
-
-    // 3. Configure Alpha Transparency Blending rules
-    WGPUColorTargetState colorTarget = {};
-    colorTarget.format = WGPUTextureFormat_BGRA8Unorm; // Standard swapchain frame texture format
-    colorTarget.writeMask = WGPUColorWriteMask_All;   // Allow writes to Red, Green, Blue, and Alpha channels
-
-    // Blending math parameters: FinalColor = (SrcColor * SrcAlpha) + (DstColor * (1 - SrcAlpha))
-    // This blend state allows us to see right through the overlapping transparent mesh copies!
-    WGPUBlendState blendState = {};
-    blendState.color.srcFactor = WGPUBlendFactor_SrcAlpha;
-    blendState.color.dstFactor = WGPUBlendFactor_OneMinusSrcAlpha;
-    blendState.color.operation = WGPUBlendOperation_Add;
-    blendState.alpha.srcFactor = WGPUBlendFactor_One;
-    blendState.alpha.dstFactor = WGPUBlendFactor_Zero;
-    blendState.alpha.operation = WGPUBlendOperation_Add;
-    colorTarget.blend = &blendState;
-
-    WGPUFragmentState fragmentState = {};
-    fragmentState.module = shaderModule;
-    fragmentState.entryPoint = "fs_main"_ws; // StringView literal for entry marker
-    fragmentState.targetCount = 1;
-    fragmentState.targets = &colorTarget;
-
-    // 4. Create the Bind Group Layout (The structural layout contract)
-    WGPUBindGroupLayoutEntry layoutEntry = {};
-    layoutEntry.binding = 0; // Matches @binding(0) in the uniform shader space
-    layoutEntry.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment; // Visible to both processing blocks
-    layoutEntry.buffer.type = WGPUBufferBindingType_Uniform;
-    layoutEntry.buffer.hasDynamicOffset = false;
-    layoutEntry.buffer.minBindingSize = sizeof(MeshUniforms);
+    // Binding 2: Skeleton Storage Buffer (Joint transformation matrices)
+    entries[2].binding = 2;
+    entries[2].visibility = WGPUShaderStage_Vertex;
+    entries[2].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
 
     WGPUBindGroupLayoutDescriptor layoutDesc = {};
-    layoutDesc.entryCount = 1;
-    layoutDesc.entries = &layoutEntry;
+    layoutDesc.entryCount = 3;
+    layoutDesc.entries = entries;
     bindGroupLayout = wgpuDeviceCreateBindGroupLayout(device, &layoutDesc);
 
-    // Combine all binding layouts layouts arrays into our grand Pipeline Layout Blueprint
+    // Build the Pipeline Layout
     WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
     pipelineLayoutDesc.bindGroupLayoutCount = 1;
     pipelineLayoutDesc.bindGroupLayouts = &bindGroupLayout;
-    WGPUPipelineLayout pipelineLayout = wgpuDeviceCreatePipelineLayout(device, &pipelineLayoutDesc);
+    pipelineLayout = wgpuDeviceCreatePipelineLayout(device, &pipelineLayoutDesc);
 
-    // 5. Finalize the Complete Immutable Pipeline State Object (PSO) Assembly
-    WGPURenderPipelineDescriptor pipelineDesc = {};
-    pipelineDesc.layout = pipelineLayout; // Attach our binding constraints layout
+    // Shaders, Vertex attribute formatting, and Depth Stencil states 
+    // are compiled here to create 'renderPipeline'...
+}
 
-    // Connect Shader Execution Blocks
-    pipelineDesc.vertex.module = shaderModule;
-    pipelineDesc.vertex.entryPoint = "vs_main"_ws;
-    pipelineDesc.vertex.bufferCount = 1;
-    pipelineDesc.vertex.buffers = &vertexBufferLayout;
-    pipelineDesc.fragment = &fragmentState;
+void Engine::CreateDepthResources() {
+    if (depthTextureView) wgpuTextureViewRelease(depthTextureView);
+    if (depthTexture) wgpuTextureRelease(depthTexture);
 
-    // Define Topology Rules
-    pipelineDesc.primitive.topology = WGPUPrimitiveTopology_TriangleList;
-    pipelineDesc.primitive.frontFace = WGPUFrontFace_CCW;
-    pipelineDesc.primitive.cullMode = WGPUCullMode_None; // Keep face boundaries double-sided for now
+    WGPUTextureDescriptor desc = {};
+    desc.dimension = WGPUTextureDimension_2D;
+    desc.size = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+    desc.format = depthFormat;
+    desc.usage = WGPUTextureUsage_RenderAttachment;
+    desc.sampleCount = 1;
+    desc.mipLevelCount = 1;
 
-    pipelineDesc.multisample.count = 1;
-    pipelineDesc.multisample.mask = 0xFFFFFFFF;
-
-    // Instantiates the permanent state machine engine setup on the graphics card GPU core
-    pipeline = wgpuDeviceCreateRenderPipeline(device, &pipelineDesc);
-
-    // Clean up transient compilation pipeline helper objects
-    wgpuPipelineLayoutRelease(pipelineLayout);
-    wgpuShaderModuleRelease(shaderModule);
-
-    // 6. Connect your allocated GPU buffer to your pipeline's binding slots
-    WGPUBindGroupEntry bindGroupEntry = {};
-    bindGroupEntry.binding = 0;
-    bindGroupEntry.buffer = uniformBuffer; // Route straight to our uniform allocation buffer variable
-    bindGroupEntry.offset = 0;
-    bindGroupEntry.size = sizeof(MeshUniforms);
-
-    WGPUBindGroupDescriptor bindGroupDesc = {};
-    bindGroupDesc.layout = bindGroupLayout;
-    bindGroupDesc.entryCount = 1;
-    bindGroupDesc.entries = &bindGroupEntry;
-
-    bindGroup = wgpuDeviceCreateBindGroup(device, &bindGroupDesc);
+    depthTexture = wgpuDeviceCreateTexture(device, &desc);
+    depthTextureView = wgpuTextureCreateView(depthTexture, nullptr);
 }
 
 // ============================================================================
-// PIPELINE EXECUTION LOOP PASSTHROUGHS
+// RESOURCE REGISTRATION (Allocations)
 // ============================================================================
+uint32_t Engine::RegisterMesh(const std::vector<gfx::Vertex>& vertices, const std::vector<uint32_t>& indices) {
+    uint32_t id = resourceIdCounter++;
+    gfx::MeshResource res;
+    res.indexCount = static_cast<uint32_t>(indices.size());
 
-void Engine::RenderFrame(WGPUTextureView targetView) {
-    // Basic Render Pass left as a fallback path (unbound to the new uniform configuration)
+    // Allocate Vertex Buffer on GPU
+    WGPUBufferDescriptor vDesc = {};
+    vDesc.size = vertices.size() * sizeof(gfx::Vertex);
+    vDesc.usage = WGPUBufferUsage_Vertex | WGPUBufferUsage_CopyDst;
+    res.vertexBuffer = wgpuDeviceCreateBuffer(device, &vDesc);
+    wgpuQueueWriteBuffer(queue, res.vertexBuffer, 0, vertices.data(), vDesc.size);
+
+    // Allocate Index Buffer on GPU
+    WGPUBufferDescriptor iDesc = {};
+    iDesc.size = indices.size() * sizeof(uint32_t);
+    iDesc.usage = WGPUBufferUsage_Index | WGPUBufferUsage_CopyDst;
+    res.indexBuffer = wgpuDeviceCreateBuffer(device, &iDesc);
+    wgpuQueueWriteBuffer(queue, res.indexBuffer, 0, indices.data(), iDesc.size);
+
+    meshRegistry[id] = res;
+    return id;
+}
+
+uint32_t Engine::RegisterSkeleton(uint32_t jointCount) {
+    uint32_t id = resourceIdCounter++;
+    gfx::SkeletonResource res;
+    res.jointCount = jointCount;
+
+    WGPUBufferDescriptor sDesc = {};
+    sDesc.size = jointCount * sizeof(float) * 16; // 16 float matrix size
+    sDesc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst;
+    res.jointStorageBuffer = wgpuDeviceCreateBuffer(device, &sDesc);
+
+    skeletonRegistry[id] = res;
+    return id;
+}
+
+void Engine::CreateRenderInstance(uint32_t meshId, uint32_t skeletonId) {
+    gfx::RenderInstance inst;
+    inst.meshId = meshId;
+    inst.skeletonId = skeletonId;
+
+    // 1. Set default identities to model matrix
+    memset(inst.modelMatrix, 0, sizeof(inst.modelMatrix));
+    inst.modelMatrix[0] = 1.0f; inst.modelMatrix[5] = 1.0f;
+    inst.modelMatrix[10] = 1.0f; inst.modelMatrix[15] = 1.0f;
+    inst.colorTint[0] = 1.0f; inst.colorTint[1] = 1.0f; inst.colorTint[2] = 1.0f; inst.colorTint[3] = 1.0f;
+
+    // 2. Allocate Instance Uniform Buffer
+    WGPUBufferDescriptor uDesc = {};
+    uDesc.size = sizeof(float) * 16 + sizeof(float) * 4; // Model matrix + color tint size
+    uDesc.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
+    inst.instanceUniformBuffer = wgpuDeviceCreateBuffer(device, &uDesc);
+
+    // 3. Create the Bind Group that routes this instance's inputs to our shader slots
+    WGPUBindGroupEntry entries[3] = {};
+    entries[0].binding = 0;
+    entries[0].buffer = globalUniformBuffer;
+    entries[0].size = sizeof(gfx::GlobalUniforms);
+
+    entries[1].binding = 1;
+    entries[1].buffer = inst.instanceUniformBuffer;
+    entries[1].size = uDesc.size;
+
+    entries[2].binding = 2;
+    entries[2].buffer = skeletonRegistry[skeletonId].jointStorageBuffer;
+    entries[2].size = skeletonRegistry[skeletonId].jointCount * sizeof(float) * 16;
+
+    WGPUBindGroupDescriptor bgDesc = {};
+    bgDesc.layout = bindGroupLayout;
+    bgDesc.entryCount = 3;
+    bgDesc.entries = entries;
+    inst.bindGroup = wgpuDeviceCreateBindGroup(device, &bgDesc);
+
+    activeSceneObjects.push_back(inst);
+}
+
+// ============================================================================
+// CORE RUNTIME PATHS
+// ============================================================================
+void Engine::Update(float deltaTime) {
+    // 1. Update Global Uniform Variables (e.g., ticking engine running time)
+    globalUniformData.time += deltaTime;
+    wgpuQueueWriteBuffer(queue, globalUniformBuffer, 0, &globalUniformData, sizeof(gfx::GlobalUniforms));
+
+    // 2. Loop through active instances to write updated transforms or colors to the GPU
+    for (auto& inst : activeSceneObjects) {
+        struct InstanceData {
+            float model[16];
+            float tint[4];
+        } data;
+        memcpy(data.model, inst.modelMatrix, sizeof(data.model));
+        memcpy(data.tint, inst.colorTint, sizeof(data.tint));
+
+        wgpuQueueWriteBuffer(queue, inst.instanceUniformBuffer, 0, &data, sizeof(data));
+    }
+}
+
+void Engine::Render(WGPUTextureView targetView) {
     WGPUCommandEncoderDescriptor encoderDesc = {};
     WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
 
     WGPURenderPassColorAttachment colorAttachment = {};
-    colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
     colorAttachment.view = targetView;
-    colorAttachment.resolveTarget = nullptr;
     colorAttachment.loadOp = WGPULoadOp_Clear;
     colorAttachment.storeOp = WGPUStoreOp_Store;
-    colorAttachment.clearValue = WGPUColor{ 0.05, 0.05, 0.05, 1.0 };
+    colorAttachment.clearValue = WGPUColor{ 0.05, 0.05, 0.06, 1.0 }; // Slate
+
+    WGPURenderPassDepthStencilAttachment depthAttachment = {};
+    depthAttachment.view = depthTextureView;
+    depthAttachment.depthLoadOp = WGPULoadOp_Clear;
+    depthAttachment.depthStoreOp = WGPUStoreOp_Store;
+    depthAttachment.depthClearValue = 1.0f;
 
     WGPURenderPassDescriptor renderPassDesc = {};
     renderPassDesc.colorAttachmentCount = 1;
     renderPassDesc.colorAttachments = &colorAttachment;
-    renderPassDesc.depthStencilAttachment = nullptr;
+    renderPassDesc.depthStencilAttachment = &depthAttachment;
 
     WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
 
-    wgpuRenderPassEncoderSetPipeline(pass, pipeline);
-    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertexBuffer, 0, WGPU_WHOLE_SIZE);
+    wgpuRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, width, height, 0.0f, 1.0f);
+    wgpuRenderPassEncoderSetPipeline(pass, renderPipeline);
 
-    if (bindGroup) { //Fix dato che la pipeline è shared nei due renderFrame
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
+    // Iterative Draw Loop: Draws every object dynamically registered to the scene
+    for (const auto& inst : activeSceneObjects) {
+        const auto& mesh = meshRegistry[inst.meshId];
+
+        wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertexBuffer, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetIndexBuffer(pass, mesh.indexBuffer, WGPUIndexFormat_Uint32, 0, WGPU_WHOLE_SIZE);
+        wgpuRenderPassEncoderSetBindGroup(pass, 0, inst.bindGroup, 0, nullptr);
+
+        wgpuRenderPassEncoderDrawIndexed(pass, mesh.indexCount, 1, 0, 0, 0);
     }
-
-    wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
 
     wgpuRenderPassEncoderEnd(pass);
     wgpuRenderPassEncoderRelease(pass);
 
-    WGPUCommandBufferDescriptor cmdBufferDesc = {};
-    WGPUCommandBuffer commandBuffer = wgpuCommandEncoderFinish(encoder, &cmdBufferDesc);
+    WGPUCommandBufferDescriptor cmdDesc = {};
+    WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(encoder, &cmdDesc);
     wgpuCommandEncoderRelease(encoder);
 
-    wgpuQueueSubmit(queue, 1, &commandBuffer);
-    wgpuCommandBufferRelease(commandBuffer);
+    wgpuQueueSubmit(queue, 1, &cmd);
+    wgpuCommandBufferRelease(cmd);
 }
 
-void Engine::RenderFrame2(WGPUTextureView targetView, float currentFrameTime) {
-    // -------------------------------------------------------------------------
-    // PHASE 1: DYNAMIC MATH COMPUTATIONS & CPU TO GPU STREAMING
-    // -------------------------------------------------------------------------
-    MeshUniforms frameData = {};
-
-    // Set up a standard 4x4 Identity Matrix. In a real 3D engine, this matrix would be calculated
-    // using Projection * View * Model matrix multiplication to handle cameras and positioning.
-    for (int i = 0; i < 16; i++) {
-        frameData.modelViewProjectionMatrix[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+void Engine::Clean() {
+    // Release active objects
+    for (auto& inst : activeSceneObjects) {
+        if (inst.bindGroup) wgpuBindGroupRelease(inst.bindGroup);
+        if (inst.instanceUniformBuffer) wgpuBufferRelease(inst.instanceUniformBuffer);
     }
+    activeSceneObjects.clear();
 
-    // Procedural color animations: Change the tint dynamically every single frame over running time.
-    frameData.customColorTint[0] = 1.0f; // Red channel full blast
-    frameData.customColorTint[1] = 0.5f + 0.5f * sinf(currentFrameTime); // Green channel fluctuates cleanly between 0 and 1
-    frameData.customColorTint[2] = 0.3f; // Keep blue values steady
-    frameData.customColorTint[3] = 0.5f; // Alpha opacity is fixed at 50% translucent transparency!
-    frameData.time = currentFrameTime;
-
-    // Stream our freshly calculated frame metadata straight up into the active uniform storage buffer memory allocation
-    if (uniformBuffer) {
-        wgpuQueueWriteBuffer(queue, uniformBuffer, 0, &frameData, sizeof(MeshUniforms));
+    // Clean registries
+    for (auto& [id, mesh] : meshRegistry) {
+        if (mesh.vertexBuffer) wgpuBufferRelease(mesh.vertexBuffer);
+        if (mesh.indexBuffer) wgpuBufferRelease(mesh.indexBuffer);
     }
+    meshRegistry.clear();
 
-    // -------------------------------------------------------------------------
-    // PHASE 2: PACKAGING HARDWARE COMMAND BUFFERS
-    // -------------------------------------------------------------------------
-    WGPUCommandEncoderDescriptor encoderDesc = {};
-    // Giving names to encoders makes looking through Dawn native profiling logs significantly easier!
-    encoderDesc.label = WGPUStringView{ "Advanced Engine Frame Encoder", strlen("Advanced Engine Frame Encoder") };
-    WGPUCommandEncoder encoder = wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
-
-    // Setup color destination targets
-    WGPURenderPassColorAttachment colorAttachment = {};
-    colorAttachment.view = targetView;
-    colorAttachment.resolveTarget = nullptr;
-    colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED; // Magic sentinel required to indicate standard 2D targets
-    colorAttachment.loadOp = WGPULoadOp_Clear;              // Force frame cache clear prior to script draw invocation
-    colorAttachment.storeOp = WGPUStoreOp_Store;            // Lock color buffers in place once drawing routines finish
-    colorAttachment.clearValue = WGPUColor{ 0.02, 0.02, 0.04, 1.0 }; // Gorgeous Deep Dark Night Blue Clear Tone
-
-    WGPURenderPassDescriptor renderPassDesc = {};
-    renderPassDesc.colorAttachmentCount = 1;
-    renderPassDesc.colorAttachments = &colorAttachment;
-    renderPassDesc.depthStencilAttachment = nullptr;
-
-    // Boot the active command writer stream loop
-    WGPURenderPassEncoder pass = wgpuCommandEncoderBeginRenderPass(encoder, &renderPassDesc);
-
-    // -------------------------------------------------------------------------
-    // PHASE 3: SCISSOR CUTS AND SCREEN SPACE CORRECTIONS
-    // -------------------------------------------------------------------------
-    // Set Viewport: Maps the geometric NDC space coordinates to physical window pixels.
-    wgpuRenderPassEncoderSetViewport(pass, 0.0f, 0.0f, width, height, 0.0f, 1.0f);
-
-    // Set Scissor Rect: A razor-sharp border check. Anything drawn outside these coordinates 
-    // is instantly discarded by hardware raster blocks before wasting processing power.
-    float capWidth = utils::max_zero(width - 40);
-    float capHeight = utils::max_zero(height - 40);
-    wgpuRenderPassEncoderSetScissorRect(pass, 20, 20, capWidth, capHeight);
-
-    // -------------------------------------------------------------------------
-    // PHASE 4: DISPATCH DRAW SCRIPTS TO HARDWARE GRAPHICS PIPELINE
-    // -------------------------------------------------------------------------
-    wgpuRenderPassEncoderSetPipeline(pass, pipeline); // Bind the pipeline configuration
-
-    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertexBuffer, 0, WGPU_WHOLE_SIZE); // Map our raw mesh coordinates array
-
-    if (bindGroup) {
-        // Map Uniform memory resources directly to binding locations within the active shader pipeline code
-        wgpuRenderPassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
+    for (auto& [id, skel] : skeletonRegistry) {
+        if (skel.jointStorageBuffer) wgpuBufferRelease(skel.jointStorageBuffer);
     }
+    skeletonRegistry.clear();
 
-    // Execute Instanced Multi-Drawing:
-    // Arguments: (pass, vertexCount, instanceCount, firstVertex, firstInstance)
-    // This draw command tells the GPU to take our 3 triangle vertices and draw them 5 distinct times
-    // in a single instruction loop, creating 5 beautiful overlapping transparent triangles on screen!
-    wgpuRenderPassEncoderDraw(pass, 3, 5, 0, 0);
-
-    // Close down recorded operations pass channels safely
-    wgpuRenderPassEncoderEnd(pass);
-    wgpuRenderPassEncoderRelease(pass);
-
-    // Convert recorded instruction paths into an executable Command Buffer object token
-    WGPUCommandBufferDescriptor cmdBufferDesc = {};
-    WGPUCommandBuffer commandBuffer = wgpuCommandEncoderFinish(encoder, &cmdBufferDesc);
-    wgpuCommandEncoderRelease(encoder);
-
-    // Instantly queue up execution sequences to be processed directly by the graphics hardware
-    wgpuQueueSubmit(queue, 1, &commandBuffer);
-    wgpuCommandBufferRelease(commandBuffer);
+    // Clean pipeline
+    if (globalUniformBuffer) wgpuBufferRelease(globalUniformBuffer);
+    if (depthTextureView) wgpuTextureViewRelease(depthTextureView);
+    if (depthTexture) wgpuTextureRelease(depthTexture);
+    if (bindGroupLayout) wgpuBindGroupLayoutRelease(bindGroupLayout);
+    if (pipelineLayout) wgpuPipelineLayoutRelease(pipelineLayout);
+    if (renderPipeline) wgpuRenderPipelineRelease(renderPipeline);
 }

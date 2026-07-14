@@ -94,13 +94,12 @@ struct Vec {
         raw.fill(init);
     }
 
-    //Costruttori statici
-
+   
     //Constexpr base canonica
     template <uint32_t index>
     static constexpr Vec Canon(T val = 1)
         requires std::is_arithmetic_v<T>&& std::convertible_to<int, T> {
-        static_assert(index < dim, "Errore: canon index dev'essere minore di dim")
+        static_assert(index < dim, "Errore: canon index dev'essere minore di dim");
         Vec v = Vec();
         v[index] = val;
         return v;
@@ -331,9 +330,6 @@ struct Mat {
         }
     }
 
-    static constexpr Mat ID = []() {
-        static_assert(std::is_convertible_to<int, T>, "Errore! Impossibile convertire valore 1");
-        return Mat(1, true); }();
 
     constexpr auto t() const {
         Mat<Cols, Rows, T> result;
@@ -423,7 +419,7 @@ struct Mat {
 
     // 3. PRODOTTO MATRICE * SCALARE (Destro)
     template <typename U>
-        requires ((depth_v<U> == _depth - 1) || (co::_depth_v<U> == 0)) && requires(T t, U u) { t* u; }
+        requires ((co::_depth_v<U> == _depth - 1) || (co::_depth_v<U> == 0)) && requires(T t, U u) { t* u; }
     constexpr auto operator*(const U& scalar) const {
         using ResultType = decltype(std::declval<T>()* std::declval<U>());
         Mat<Rows, Cols, ResultType> result;
@@ -444,7 +440,7 @@ struct Mat {
     }
 
     template <typename Scalar>
-        requires ((depth_v<Scalar> == _depth - 1) || (co::_depth_v<Scalar> == 0)) && requires(Scalar s, T t) { s* t; }
+        requires ((co::_depth_v<Scalar> == _depth - 1) || (co::_depth_v<Scalar> == 0)) && requires(Scalar s, T t) { s* t; }
     friend constexpr auto operator*(const Scalar& scalar, const Mat& mat) {
         using ResultType = decltype(std::declval<Scalar>()* std::declval<T>());
         Mat<Rows, Cols, ResultType> result;
@@ -462,6 +458,12 @@ struct Mat {
     // Accesso in sola lettura (const)
     const T& operator()(uint32_t row, uint32_t col) const {
         return raw[row * Cols + col];
+    }
+
+    //Costruttori statici
+    static constexpr const Mat<Rows, Cols, T> Identity() {
+        static_assert(std::is_convertible_v<int, T>, "Errore, identità non convertibile");
+        return Mat<Rows, Cols, T>(1, true);
     }
 };
 
@@ -490,6 +492,7 @@ constexpr auto Vec<dim, T>::operator*(const Mat<dim, NewCols, U>& mat) const {
     }
     return result;
 }
+
 //Tipi utili
 using Vec3f = Vec<3, float>;
 using Vec4f = Vec<4, float>;
