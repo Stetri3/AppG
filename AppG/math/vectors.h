@@ -53,12 +53,21 @@ template <uint32_t dim = 3, typename T = float>
 struct Vec {
     std::array<T, dim> raw;
     enum { _depth = co::_depth_v<T> + 1};
+
+
+    //COSTRUTTORI:
+
+    //Zeri
     constexpr Vec() : raw{} {}
 
+    //Da array generica (dim DEVE essere uguale a size)
     constexpr Vec(std::span<const T> source) {
         std::copy(source.begin(), source.end(), raw.begin());
     }
 
+    //Da array generica con dim non per forza uguale
+    //Il vec viene riempito partendo dallo 0, i restanti sono impostati a 0 (higher) o tagliati (lower)
+    //diff scrive la differenza tra size, source_size - dim
     constexpr Vec(std::span<const T> source, int32_t& diff) : raw{} {
         const std::size_t src_size = source.size();
         diff = static_cast<int32_t>(src_size) - static_cast<int32_t>(dim);
@@ -75,8 +84,42 @@ struct Vec {
         }
     }
 
+    // Da initializer list, dim DEVE essere uguale o non compila nemmeno
+    template <typename... Args>
+        requires (sizeof...(Args) == dim) && (std::is_convertible_v<Args, T> && ...)
+    constexpr Vec(Args&&... args) : raw{ static_cast<T>(std::forward<Args>(args))... } {}
+
+    //Uniforme
     constexpr Vec(const T& init) {
         raw.fill(init);
+    }
+
+    //Costruttori statici
+
+    //Constexpr base canonica
+    template <uint32_t index>
+    static constexpr Vec Canon(T val = 1)
+        requires std::is_arithmetic_v<T>&& std::convertible_to<int, T> {
+        static_assert(index < dim, "Errore: canon index dev'essere minore di dim")
+        Vec v = Vec();
+        v[index] = val;
+        return v;
+    }
+    //Runtime canonica
+    template <bool check = true>
+    static Vec Canon(uint32_t index, T val = 1)
+        requires std::is_arithmetic_v<T>&& std::convertible_to<int, T> {
+
+        if constexpr (check) {
+            if (index >= dim)
+                return Vec();
+            //TODO: aggiungere una lista globale di pointer/metadati di variabili corrotte, per il runtime fixing
+        }
+        else {
+            Vec v = Vec(); // Inizializzato a zero
+            v[index] = val;
+            return v;
+        }
     }
 
     constexpr auto operator-() const requires requires(T t) { -t; } {
@@ -233,9 +276,15 @@ template <uint32_t Rows, uint32_t Cols, typename T>
 struct Mat {
     std::array<T, Rows* Cols> raw;
 
-    constexpr Mat() : raw{} {}
     enum { _depth = co::_depth_v<T> +1 };
 
+
+    //COSTRUTTORI
+
+    //Zeri
+    constexpr Mat() : raw{} {}
+
+    //Da raw array, a size giusta
     constexpr Mat(std::span<const T> source) {
         const std::size_t target_size = Rows * Cols;
         const std::size_t src_size = source.size();
@@ -251,7 +300,7 @@ struct Mat {
             }
         }
     }
-
+    //Vedere costruttori vector
     constexpr Mat(std::span<const T> source, int32_t& diff) : raw{} {
         const std::size_t src_size = source.size();
         const std::size_t target_size = Rows * Cols;
@@ -269,6 +318,7 @@ struct Mat {
         }
     }
 
+
     constexpr Mat(const T& init, bool diagonal_only = false) : raw{} {
         if (diagonal_only) {
             const uint32_t min_dim = std::min(Rows, Cols);
@@ -280,6 +330,10 @@ struct Mat {
             raw.fill(init);
         }
     }
+
+    static constexpr Mat ID = []() {
+        static_assert(std::is_convertible_to<int, T>, "Errore! Impossibile convertire valore 1");
+        return Mat(1, true); }();
 
     constexpr auto t() const {
         Mat<Cols, Rows, T> result;
