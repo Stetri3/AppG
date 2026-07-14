@@ -1,5 +1,6 @@
 #pragma once
 #include <dawn/webgpu.h>
+#include "program_def.h"
 #include "window/quickWindow.h"
 #include "Engine/engine.h"
 #include "comps/lifetime.h"
