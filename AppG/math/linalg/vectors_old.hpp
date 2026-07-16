@@ -10,26 +10,80 @@
 #include <limits>
 #include <algorithm>
 
+
+//ATTENZIONE! IL CODICE COMPILA E FUNZIONA, MAI CAMBIARLO, SE PROPRIO PROPRIO FARE UN BACKUP TENENDO QUESTO MESSAGGIO
 template <uint32_t dim, typename T>
 struct Vec;
 template <uint32_t Rows, uint32_t Cols, typename T>
 struct Mat;
+template <uint32_t dim, typename T>
+struct MatQ;
 
 namespace math::cond {
+    //Condizionali constexpr 
 
-    // Tratto base per identificare Vec e Mat
+    //Per identificare vec
+
     template <typename T>
-    struct is_algebraic : std::false_type {};
+    struct is_vec : std::false_type {};
 
     template <uint32_t dim, typename T>
-    struct is_algebraic<Vec<dim, T>> : std::true_type {};
-
-    template <uint32_t Rows, uint32_t Cols, typename T>
-    struct is_algebraic<Mat<Rows, Cols, T>> : std::true_type {};
+    struct is_vec<Vec<dim, T>> : std::true_type {};
 
     // Il concetto finale
     template <typename T>
-    concept AlgebraicType = is_algebraic<T>::value;
+    concept VecType = is_vec<T>::value;
+    //Alias constexpr bool diretto
+    template <typename T>
+    inline constexpr bool is_vec_v = is_vec<T>::value;
+
+
+    //Per MAT::
+
+    //Per matQ
+    template <typename T>
+    struct is_matQ : std::false_type {};
+
+    template <uint32_t dim, typename T>
+    struct is_matQ<MatQ<dim, T>> : std::true_type {};
+
+    // Il concetto finale
+    template <typename T>
+    concept MatQType = is_matQ<T>::value;
+    //Alias bool
+    template <typename T>
+    inline constexpr bool is_matQ_v = is_matQ<T>::value;
+
+    //Per mat generica
+    template <typename T>
+    struct is_mat : std::false_type {};
+
+    template <uint32_t Rows, uint32_t Cols, typename T>
+    struct is_mat<Mat<Rows, Cols, T>> : std::true_type {};
+
+    template <uint32_t dim, typename T>
+    struct is_mat<MatQ<dim, T>> : std::true_type {};
+
+    // Il concetto finale
+    template <typename T>
+    concept MatType = is_mat<T>::value;
+    //Alias bool
+    template <typename T>
+    inline constexpr bool is_mat_v = is_mat<T>::value;
+
+    // 2. Il concetto algebraic (Vec || Mat)
+    template <typename T>
+    concept AlgebraicType = VecType<T> || MatType<T>;
+
+    // =================================================================
+    // 3. Il trait "is_algebraic" definito in una riga usando il concetto
+    // =================================================================
+    template <typename T>
+    struct is_algebraic : std::bool_constant<AlgebraicType<T>> {};
+
+    //Constexpr bool
+    template <typename T>
+    inline constexpr bool is_algebraic_v = is_algebraic<T>::value;
 
     //Struct per ottenere il metadato _depth
     template <typename T, typename = void>
@@ -45,6 +99,14 @@ namespace math::cond {
 
     template <typename T>
     inline constexpr uint32_t _depth_v = get_depth<T>::value;
+
+    //utile: template per passare tipi a val vs const ref
+    template <typename T>
+    using pass_t = std::conditional_t<
+        (sizeof(T) <= 16 && std::is_trivially_copyable_v<T>),
+        T,
+        const T&
+    >;
 }
 
 namespace co = math::cond;
@@ -52,10 +114,21 @@ namespace co = math::cond;
 template <uint32_t dim = 3, typename T = float>
 struct Vec {
     std::array<T, dim> raw;
-    enum { _depth = co::_depth_v<T> + 1};
+
+    //Definizioni constexpr per ricavare i meta
+    static constexpr uint32_t SIZE = dim;
+    using ElType = T;
+
+    //Definizione a 0 costo (0 righe a runtime) per scovare differenze tra vector simili
+    enum { _depth = co::_depth_v<T> +1 };
 
 
     //COSTRUTTORI:
+
+    //Tenere copia default (per ereditare trivial copiability)
+    Vec(const Vec&) = default;
+    Vec(Vec&) = default;
+    constexpr Vec& operator =(const Vec&) = default;
 
     //Zeri
     constexpr Vec() : raw{} {}
@@ -90,15 +163,14 @@ struct Vec {
     constexpr Vec(Args&&... args) : raw{ static_cast<T>(std::forward<Args>(args))... } {}
 
     //Uniforme
-    constexpr Vec(const T& init) {
+    constexpr Vec(co::pass_t<T> init) {
         raw.fill(init);
     }
 
-   
+
     //Constexpr base canonica
     template <uint32_t index>
-    static constexpr Vec Canon(T val = 1)
-        requires std::is_arithmetic_v<T>&& std::convertible_to<int, T> {
+    static constexpr Vec Canon(co::pass_t<T> val = 1) {
         static_assert(index < dim, "Errore: canon index dev'essere minore di dim");
         Vec v = Vec();
         v[index] = val;
@@ -106,7 +178,7 @@ struct Vec {
     }
     //Runtime canonica
     template <bool check = true>
-    static Vec Canon(uint32_t index, T val = 1)
+    static Vec Canon(uint32_t index, co::pass_t<T> val = 1)
         requires std::is_arithmetic_v<T>&& std::convertible_to<int, T> {
 
         if constexpr (check) {
@@ -131,12 +203,12 @@ struct Vec {
     }
 
     template <typename U>
-        requires requires(T t, U u) { t + u; }
-    constexpr Vec<dim, std::common_type_t<T, U>> operator+(const Vec<dim, U>& other) const {
-        using ReturnType = std::common_type_t<T, U>;
-        Vec<dim, ReturnType> result;
+        requires requires(T t, U u) { t - u; }
+    constexpr auto operator+(const Vec<dim, U>& other) const {
+        using ResultType = decltype(std::declval<T>() + std::declval<U>());
+        Vec<dim, ResultType> result;
         for (size_t i = 0; i < dim; ++i) {
-            result.raw[i] = static_cast<ReturnType>(raw[i] + other.raw[i]);
+            result.raw[i] = raw[i] + other.raw[i];
         }
         return result;
     }
@@ -260,7 +332,7 @@ struct Vec {
     }
 
     template <typename Scalar>
-        requires requires(Scalar s, T t) { s* t; }
+        requires ((co::_depth_v<Scalar> == _depth - 1) || (co::_depth_v<Scalar> == 0)) && requires(Scalar s, T t) { s* t; }
     friend constexpr auto operator*(const Scalar& scalar, const Vec& vec) {
         using ResultType = decltype(std::declval<Scalar>()* std::declval<T>());
         Vec<dim, ResultType> result;
@@ -275,15 +347,25 @@ template <uint32_t Rows, uint32_t Cols, typename T>
 struct Mat {
     std::array<T, Rows* Cols> raw;
 
+    //Ricavo tipi
+    static constexpr uint32_t ROWS = Rows;
+    static constexpr uint32_t COLS = Cols;
+    using ElType = T;
+
     enum { _depth = co::_depth_v<T> +1 };
 
 
     //COSTRUTTORI
+    //Tenere copia default (per ereditare trivial copiability)
+    Mat(const Mat&) = default;
+    Mat(Mat&) = default;
+    constexpr Mat& operator =(const Mat&) = default;
+
 
     //Zeri
     constexpr Mat() : raw{} {}
 
-    //Da raw array, a size giusta
+    //Da raw array, a size giusta. Mai usare se non si conosce la size a priori
     constexpr Mat(std::span<const T> source) {
         const std::size_t target_size = Rows * Cols;
         const std::size_t src_size = source.size();
@@ -317,20 +399,12 @@ struct Mat {
         }
     }
 
-
-    constexpr Mat(const T& init, bool diagonal_only = false) : raw{} {
-        if (diagonal_only) {
-            const uint32_t min_dim = std::min(Rows, Cols);
-            for (uint32_t i = 0; i < min_dim; ++i) {
-                raw[i * Cols + i] = init;
-            }
-        }
-        else {
-            raw.fill(init);
-        }
+    //Uniforme
+    constexpr Mat(co::pass_t<T> init) : raw{} {
+        raw.fill(init);
     }
 
-
+    //trasposta
     constexpr auto t() const {
         Mat<Cols, Rows, T> result;
         for (uint32_t r = 0; r < Rows; ++r) {
@@ -452,7 +526,7 @@ struct Mat {
 
     // Accesso in lettura/scrittura (non-const)
     T& operator()(uint32_t row, uint32_t col) {
-        return raw[row * Cols + col]; 
+        return raw[row * Cols + col];
     }
 
     // Accesso in sola lettura (const)
@@ -461,10 +535,8 @@ struct Mat {
     }
 
     //Costruttori statici
-    static constexpr const Mat<Rows, Cols, T> Identity() {
-        static_assert(std::is_convertible_v<int, T>, "Errore, identità non convertibile");
-        return Mat<Rows, Cols, T>(1, true);
-    }
+
+
 };
 
 // --- DEFINIZIONE ESTERNA DI VEC * MAT ---
@@ -493,6 +565,65 @@ constexpr auto Vec<dim, T>::operator*(const Mat<dim, NewCols, U>& mat) const {
     return result;
 }
 
+//TIPO MatQ : Matrice quadrata
+
+template <uint32_t dim, typename T>
+struct MatQ : public Mat<dim, dim, T> {
+
+    //Ereditarietà
+    using Base = Mat<dim, dim, T>;
+    using Base::Mat;
+    using Base::raw;
+
+    static constexpr uint32_t DIM = dim;
+
+    //COSTRUTTORI
+
+    //Tenere copia default (per ereditare trivial copiability)
+    MatQ(const MatQ&) = default;
+    MatQ(MatQ&) = default;
+    constexpr MatQ& operator =(const MatQ&) = default;
+
+
+    //Ereditati da base
+    constexpr MatQ() : Base() {}
+    constexpr MatQ(std::span<T> source) : Base(source) {}
+    constexpr MatQ(std::span<T> source, uint32_t& diff) : Base(source, diff) {}
+    constexpr MatQ(co::pass_t<T> init) : Base(init) {}
+
+    //Conversione implicita da Base (Mat) quando Cols = Rows = dim, T = T
+    constexpr MatQ(const Mat<dim, dim, T>& other) : Base(other) {}
+
+    constexpr MatQ& operator=(const Base& other) {
+        Base::operator=(other);
+        return *this;
+    }
+
+    //Costruttori statici
+
+    //A compile time strict
+    template <T val = 1>
+    static consteval MatQ Diagonal() noexcept {
+        MatQ ret{}; //costruzione a zeri
+        for (uint32_t i = 0; i < dim; ++i) {
+            ret.raw[i * (dim + 1)] = val;
+        }
+        return ret;
+    }
+
+    //Stessa funzione, semi compile time
+    static constexpr MatQ Diagonal(co::pass_t<T> val) {
+        MatQ ret{}; //costruzione a zeri
+        for (uint32_t i = 0; i < dim; ++i) {
+            ret.raw[i * (dim + 1)] = val;
+        }
+        return ret;
+    }
+    //Alias per comodità
+    static consteval MatQ One() { return Diagonal(); } //Alias per 1
+    inline static constexpr MatQ One(co::pass_t<T> val) { return Diagonal(val); } //Alias per 1
+};
+
 //Tipi utili
 using Vec3f = Vec<3, float>;
 using Vec4f = Vec<4, float>;
@@ -504,9 +635,6 @@ using Vec3u16 = Vec<3, uint16_t>;
 using Vec4u16 = Vec<4, uint16_t>;
 using Vec3i16 = Vec<3, int16_t>;
 using Vec4i16 = Vec<4, int16_t>;
-
-template <uint32_t dim, typename T>
-using MatQ = Mat<dim, dim, T>;
 
 using Mat4f = MatQ<4, float>;
 using Mat3f = MatQ<3, float>;

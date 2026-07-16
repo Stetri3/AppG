@@ -19,16 +19,22 @@ add_executable (${APP_NAME}
      "utils/quickShaders.h" "Engine/engine.h"
     "Engine/engine.cpp" "comps/lifetime.h" "comps/lifetime.cpp"
     "program_def.h" "objects/skeleton.h"
-    "objects/skeleton.cpp" "math/vectors.h" "Engine/engine_def.h")
+    "objects/skeleton.cpp" "math/linalg/vectors.h"
+    "Engine/engine_def.h" "math/high.h"
+    "math/linalg/vector_lists.h" "global_macro.h"
+    "math/linalg/vec_utils.h")
 
-set_property(TARGET ${APP_NAME} PROPERTY CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED on)
 
-add_executable(testing "math/testing.cpp" "debug_helper.h" )
+add_executable(testing "math/testing.cpp" "debug_helper.h"  "math/linalg/vectors.h" "math/linalg/vec_utils.h")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-target_precompile_headers(AppG PRIVATE "config.h" "debug_helper.h" "common_def.h" "math/vectors.h")
+target_precompile_headers(AppG PRIVATE "config.h" "global_macro.h" "debug_helper.h" "common_def.h" "math/vectors.h")
 #target_precompile_headers(AppG PRIVATE "config.h" "common_def.h")
+target_precompile_headers(testing PRIVATE "debug_helper.h")
+target_compile_definitions(testing PRIVATE DEBUG) #imposta la macro DEBUG (per debughelper)
 
 set(Dawn_RELEASE_DIR "C:/Dev/libs/dawn_dist/lib/cmake/Dawn")
 set(Dawn_DEBUG_DIR   "C:/Dev/libs/dawn_debug_dist/lib/cmake/Dawn")

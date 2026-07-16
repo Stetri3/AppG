@@ -1,6 +1,9 @@
-#include "vectors.h"
-#define DEBUG
-#include "../debug_helper.h"
+
+#include "linalg/vectors.h"
+//#include "../debug_helper.h"
+#include <iostream>
+
+void run_algebra_tests();
 int main() {
     DebugMessage("--- STARTING BRAVE TESTS (STRICT ALGEBRA) ---");
 
@@ -40,12 +43,58 @@ int main() {
     // m_singola: Matrice 2x2 di float (_depth = 1)
     // Siccome m_singola ha depth == _depth - 1 ed è compatibile come scalare
     // per gli elementi interni (che sono Mat2f), deve fare il prodotto per scalare di blocco.
-    Vec<2, Mat3f> v_mat; // supponendo l'uso delle tue typedef
-    Mat3f m_singola(1.0f, true); // Identità se hai tenuto la logica diagonal
+    Vec<3, Mat3f> v_mat{1,2,3}; // supponendo l'uso delle tue typedef
+    Mat3f m_singola = Mat3f::One(); // Identità se hai tenuto la logica diagonal
 
     // Deve distribuire la matrice su ogni elemento del vettore
     auto res_ambig = v_mat * m_singola;
-
+    DebugMessage(res_ambig);
     DebugMessage("--- ALL STRICT TESTS PASSED ---");
+
+    Mat3i a{1, 1, 1, 2, 1, 3, 5, 9, 0};
+    auto b = v_mat * a;
+    DebugMessage(b.str());
+    run_algebra_tests();
     return 0;
+}
+void run_algebra_tests() {
+    // 1. Matrice * Vettore
+    constexpr Mat<2, 3, int> A{
+        1, 2, 3,
+        4, 5, 6
+    };
+    constexpr Vec<3, int> v{ 2, 1, 3 };
+    auto res_mv = A * v; // Atteso: [13, 31]
+    DebugMessage(res_mv.str());
+
+    // 2. Vettore * Matrice
+    constexpr Vec<2, int> u{ 2, 3 };
+    auto res_vm = u * A; // Atteso: [14, 19, 24]
+    DebugMessage(res_vm.str());
+
+    // 3. Trasposta
+    auto A_t = A.t(); // Atteso: [[1, 4]; [2, 5]; [3, 6]]
+    DebugMessage(A_t.str());
+
+    // 4. Matrice * Matrice
+    constexpr Mat<3, 2, int> B{
+        7, 8,
+        9, 1,
+        2, 3
+    };
+    auto C = A * B; // Atteso: [[31, 19]; [85, 55]]
+    DebugMessage(C.str());
+
+    // 5. Hadamard (%) e Norme su vettori
+    constexpr Vec<3, float> v1{ 3.0f, 0.0f, 4.0f };
+    constexpr Vec<3, float> v2{ 2.0f, 10.0f, -1.0f };
+
+    auto v_had = v1 % v2; // Atteso: [6, 0, -4]
+    DebugMessage(v_had.str());
+
+    float n_sq = v1.norm(); // Atteso: 25
+    DebugMessage(n_sq);
+
+    auto v1_n = v1.normalized(); // Atteso: [0.6, 0.0, 0.8]
+    DebugMessage(v1_n.str());
 }

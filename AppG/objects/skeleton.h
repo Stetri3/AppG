@@ -1,5 +1,5 @@
 #pragma once
-#include "../math/vectors.h"
+#include "../math/linalg/vectors.h"
 #include <vector>
 #include <cstdint>
 #include <span>

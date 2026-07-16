@@ -18,7 +18,7 @@ namespace sk {
 		int stack_ptr = 0;
 
 		// Seed a default global root state
-		parent_stack[0] = { Mat3f::Identity(), Vec3f{0.0f, 0.0f, 0.0f} };
+		parent_stack[0] = { Mat3f::One(), Vec3f{0.0f, 0.0f, 0.0f} };
 
 		for (size_t i = 0; i < nodes.size(); ++i) {
 			Node& node = nodes[i];
@@ -30,7 +30,7 @@ namespace sk {
 				for (const auto& att : attached) {
 					if (att.index == i) {
 						current_parent.pos = att.pos;
-						current_parent.ori = Mat3f::Identity(); // Base nodes align with body
+						current_parent.ori = Mat3f::One(); // Base nodes align with body
 						break;
 					}
 				}

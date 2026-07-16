@@ -2,9 +2,6 @@
 //
 
 #include "AppG.h"
-#include <utility>
-#include <chrono>
-#include <thread>
 #include "utils/quickShaders.h"
 using namespace std;
 
@@ -37,6 +34,6 @@ int main()
 	while (program.run()) {
 		//Testing
 		wgpuSurfacePresent(program.getWinSurface());
-		this_thread::sleep_for(chrono::milliseconds(16));
+		Sleep(16);
 	}
 }

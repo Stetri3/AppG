@@ -3,13 +3,31 @@
 #ifdef DEBUG
 #define DEB_BLOCK
 #define DEB_FRIEND friend class ::DebugHelper;
+#include <format>      
+#include <string_view> 
+#include <type_traits> 
 #include <cstdio>
-#include <format>
 template<typename... Args>
 void DebugMessageImpl(Args&&... args) {
-    // Sfrutta std::format per convertire e unire tutto in una stringa sola
-    // C++20 permette di formattare tipi base direttamente così
-    ((std::fwrite(std::format("{}", std::forward<Args>(args)).data(), 1, std::format("{}", args).size(), stdout)), ...);
+    auto format_and_write = [](const auto& arg) {
+        // Se l'argomento è convertibile a const char* (come FormatBuffer o stringhe raw)
+        if constexpr (std::is_convertible_v<decltype(arg), const char*>) {
+            const char* str = arg;
+            std::fwrite(str, 1, std::char_traits<char>::length(str), stdout);
+        }
+        // Se l'argomento ha direttamente un metodo .str() (es. Vec o Mat passati direttamente)
+        else if constexpr (requires { arg.str(); }) {
+            const char* str = arg.str();
+            std::fwrite(str, 1, std::char_traits<char>::length(str), stdout);
+        }
+        // Altrimenti usa std::format standard (per int, float, ecc.)
+        else {
+            auto formatted = std::format("{}", arg);
+            std::fwrite(formatted.data(), 1, formatted.size(), stdout);
+        }
+        };
+
+    (format_and_write(args), ...);
     std::putchar('\n');
 }
 #define DebugMessage(...) DebugMessageImpl(__VA_ARGS__)
